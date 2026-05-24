@@ -1,0 +1,18 @@
+name: daily_ai_agent_trend_digest
+description: "일간 AI 트렌드 보고: 시간별로 수집한 raw_items를 요약해 스프레드시트와 Discord에 게시합니다."
+entrypoint: python -m ai_trends.daily
+schedule:
+  cron: "0 8 * * *"
+  timezone_env: HERMES_TIMEZONE
+env:
+  - AI_TRENDS_SPREADSHEET_ID
+  - AI_TRENDS_DISCORD_WEBHOOK_URL
+  - AI_TRENDS_GITHUB_TOKEN
+  - HERMES_TIMEZONE
+outputs:
+  - daily_digest
+  - discord_daily_summary
+failure_policy:
+  spreadsheet_before_discord: true
+  on_spreadsheet_failure: "일간 보고 행 추가 실패: Discord 전송 전에 중단하고 재시도할 수 있도록 실패한 행 payload를 노출합니다."
+  on_discord_failure: "Discord 전송 실패: 스프레드시트 행은 유지하고 Discord 상태를 failed로 표시한 뒤 알림만 재시도합니다."

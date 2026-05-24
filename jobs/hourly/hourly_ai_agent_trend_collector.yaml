@@ -1,0 +1,16 @@
+name: hourly_ai_agent_trend_collector
+description: "시간별 AI 트렌드 수집: raw_items를 스프레드시트에 추가하며 Discord 보고는 보내지 않습니다."
+entrypoint: python -m ai_trends.collector
+schedule:
+  cron: "0 * * * *"
+  timezone_env: HERMES_TIMEZONE
+env:
+  - AI_TRENDS_SPREADSHEET_ID
+  - AI_TRENDS_GITHUB_TOKEN
+  - HERMES_TIMEZONE
+outputs:
+  - raw_items
+failure_policy:
+  spreadsheet_before_discord: true
+  on_spreadsheet_failure: "스프레드시트 행 추가 실패: 중단 후 다음 시간별 실행에서 재시도합니다."
+  on_discord_failure: "해당 없음: 시간별 수집기는 Discord 보고를 보내지 않습니다."
