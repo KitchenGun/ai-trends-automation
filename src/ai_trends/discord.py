@@ -62,7 +62,7 @@ def render_daily_digest_message(digest: DailyDigest) -> str:
 
     lines = [
         f"## 일간 AI 트렌드 보고 — {digest.digest_date}",
-        digest.summary,
+        _digest_summary(digest.summary, item_count=len(digest.items), period_label="일간"),
         "",
         *_item_lines(digest.items),
     ]
@@ -74,7 +74,7 @@ def render_weekly_digest_message(digest: WeeklyDigest) -> str:
 
     lines = [
         f"## 주간 AI 트렌드 보고 — {digest.week_start} ~ {digest.week_end}",
-        digest.summary,
+        _digest_summary(digest.summary, item_count=len(digest.items), period_label="주간"),
         "",
         *_item_lines(digest.items),
     ]
@@ -141,7 +141,7 @@ def _item_lines(items: tuple[ScoredTrendItem, ...]) -> list[str]:
                 f"{index}. **{raw.title}**",
                 f"   링크: {raw.url}",
                 f"   점수: 관련성 {item.relevance_score}/10; 중요도 {item.importance_score}/10",
-                f"   새 기능/변경점: {_short_text(raw.summary)}",
+                f"   새 기능/변경점: {_feature_note(item)}",
                 f"   선정 이유: {_selection_reason(item)}",
                 f"   근거: {_evidence_note(item)}",
                 f"   내 환경에서의 활용: {_environment_use(item)}",
@@ -155,6 +155,36 @@ def _short_text(value: str, *, limit: int = 180) -> str:
     if len(text) <= limit:
         return text
     return f"{text[: limit - 1].rstrip()}…"
+
+
+def _digest_summary(value: str, *, item_count: int, period_label: str) -> str:
+    summary = _short_text(value, limit=260)
+    if _looks_korean(summary):
+        return summary
+    return (
+        f"{period_label} AI 에이전트 트렌드 보고: 총 {item_count}개 항목을 다룹니다. "
+        "주요 변화와 운영 영향은 아래 항목별 한국어 해설을 확인하세요."
+    )
+
+
+def _feature_note(item: ScoredTrendItem) -> str:
+    raw = item.raw_item
+    summary = _short_text(_strip_agent_prefix(raw.summary), limit=180)
+    if _looks_korean(summary):
+        return summary
+
+    haystack = " ".join((raw.title, raw.summary, raw.source_type, " ".join(raw.tags))).lower()
+    if raw.source_type == "x_rss_signal":
+        return "공개 X RSS에서 포착된 AI 에이전트 관련 조기 신호입니다."
+    if "mcp" in haystack:
+        return "MCP 기반 도구 연결과 에이전트 오케스트레이션에 관련된 변경 신호입니다."
+    if "hermes" in haystack:
+        return "Hermes Agent 운영과 자동화 흐름에 참고할 만한 변경 신호입니다."
+    if any(keyword in haystack for keyword in ("langchain", "ai sdk", "tool calling", "orchestration", "agent")):
+        return "AI 에이전트 도구 호출, 오케스트레이션, 자동화 설계와 관련된 변경입니다."
+    if raw.source_type in {"github_release", "release"}:
+        return "에이전트 생태계 의존성 릴리스에서 유지보수 또는 호환성 변화를 확인했습니다."
+    return "AI 에이전트 트렌드 후보로 추적할 만한 변화가 확인됐습니다."
 
 
 def _selection_reason(item: ScoredTrendItem) -> str:

@@ -53,7 +53,8 @@ def test_daily_template_includes_scores_rationale_and_links() -> None:
     message = render_daily_digest_message(digest)
 
     assert "일간 AI 트렌드 보고 — 2026-05-22" in message
-    assert "Daily summary for AI agent builders." in message
+    assert "일간 AI 에이전트 트렌드 보고: 총 1개 항목을 다룹니다." in message
+    assert "Daily summary for AI agent builders." not in message
     assert "Hermes autonomous review" in message
     assert "관련성 9/10" in message
     assert "중요도 8/10" in message
@@ -77,7 +78,8 @@ def test_weekly_template_includes_range_scores_and_links() -> None:
     message = render_weekly_digest_message(digest)
 
     assert "주간 AI 트렌드 보고 — 2026-05-18 ~ 2026-05-24" in message
-    assert "Weekly summary for AI agent builders." in message
+    assert "주간 AI 에이전트 트렌드 보고: 총 1개 항목을 다룹니다." in message
+    assert "Weekly summary for AI agent builders." not in message
     assert "관련성 9/10" in message
     assert "https://example.invalid/review" in message
     assert len(message) <= DISCORD_CONTENT_LIMIT
@@ -104,6 +106,8 @@ def test_daily_template_renders_korean_explanation_sections_and_hides_internal_r
     assert "Hermes agent:" not in message
     assert "Fallback(hermes_cli_timeout)" not in message
     assert "자동 예비 평가 기준으로 선별됨" in message
+    assert "Daily summary for AI agent builders." not in message
+    assert "Adds MCP server orchestration and safer cron handoff support." not in message
 
 
 def test_weekly_template_renders_same_korean_sections() -> None:
@@ -162,7 +166,8 @@ def test_daily_template_translates_rationale_and_internal_fallback_into_korean_s
 
     message = render_daily_digest_message(digest)
 
-    assert "새 기능/변경점: MCP orchestration release improves agent tool routing." in message
+    assert "새 기능/변경점: MCP 기반 도구 연결과 에이전트 오케스트레이션에 관련된 변경 신호입니다." in message
+    assert "MCP orchestration release improves agent tool routing." not in message
     assert "선정 이유: 자동 예비 평가 기준으로 선별됨" in message
     assert "근거: GitHub release 기반 공개 자료로 판단" in message
     assert "내 환경에서의 활용:" in message
@@ -192,7 +197,8 @@ def test_weekly_template_uses_same_korean_sections_for_x_rss_signal() -> None:
 
     message = render_weekly_digest_message(digest)
 
-    assert "새 기능/변경점: NousResearch shared early Hermes Agent automation notes." in message
+    assert "새 기능/변경점: 공개 X RSS에서 포착된 AI 에이전트 관련 조기 신호입니다." in message
+    assert "NousResearch shared early Hermes Agent automation notes." not in message
     assert "선정 이유:" in message
     assert "공개 X RSS 기반 조기 신호" in message
     assert "공개 소셜 신호라 보조 근거로만 사용" in message
