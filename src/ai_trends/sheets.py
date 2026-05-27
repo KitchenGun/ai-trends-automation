@@ -30,6 +30,7 @@ RAW_ITEMS_COLUMNS: tuple[str, ...] = (
     "importance_score",
     "score_rationale",
 )
+MAX_RAW_ITEM_SUMMARY_LENGTH = 4000
 DAILY_DIGEST_COLUMNS: tuple[str, ...] = (
     "digest_date",
     "summary",
@@ -68,7 +69,7 @@ def hermes_home() -> Path:
 
 
 GOOGLE_API = hermes_home() / "hermes-agent" / "skills" / "productivity" / "google-workspace" / "scripts" / "google_api.py"
-GOOGLE_TOKEN = Path(os.environ.get("GOOGLE_TOKEN_PATH", str(hermes_home() / "google_token.json"))).expanduser().resolve()
+GOOGLE_TOKEN = Path(os.environ.get("GOOGLE_TOKEN_PATH", str(hermes_home() / "google_sheets_token.json"))).expanduser().resolve()
 GOOGLE_SCOPES = ("https://www.googleapis.com/auth/spreadsheets",)
 
 
@@ -87,13 +88,17 @@ class SheetsClient(Protocol):
         """Update rows in a sheet range."""
         ...
 
+    def delete_rows(self, spreadsheet_id: str, sheet_name: str, row_numbers: Sequence[int]) -> object:
+        """Delete one-based row numbers from a sheet."""
+        ...
+
 
 class GwsSheetsClient:
     """Google Workspace adapter backed by Hermes' local google_api.py."""
 
-    def __init__(self, google_api: str | Path | None = None, timeout: int = 60) -> None:
+    def __init__(self, google_api: str | Path | None = None, timeout: int | None = None) -> None:
         self.google_api = Path(google_api) if google_api is not None else GOOGLE_API
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else _sheets_timeout_seconds()
 
     def append_values(self, spreadsheet_id: str, range_name: str, values: list[list[str]]) -> object:
         if not values:
@@ -124,6 +129,31 @@ class GwsSheetsClient:
     def update_values(self, spreadsheet_id: str, range_name: str, values: list[list[str]]) -> object:
         self._ensure_sheet(spreadsheet_id, _sheet_name(range_name))
         return self._run("update", spreadsheet_id, range_name, values)
+
+    def delete_rows(self, spreadsheet_id: str, sheet_name: str, row_numbers: Sequence[int]) -> object:
+        rows = tuple(sorted({row for row in row_numbers if row > 1}, reverse=True))
+        if not rows:
+            return {"deletedRows": 0}
+        self._ensure_sheet(spreadsheet_id, sheet_name)
+        sheet_id = self._sheet_id(spreadsheet_id, sheet_name)
+        requests = [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": start - 1,
+                        "endIndex": end,
+                    }
+                }
+            }
+            for start, end in _descending_contiguous_ranges(rows)
+        ]
+        result = _build_sheets_service().spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": requests},
+        ).execute()
+        return {**result, "deletedRows": len(rows)}
 
     def _run(self, command: str, spreadsheet_id: str, range_name: str, values: list[list[str]]) -> dict[str, object]:
         cmd = [
@@ -168,7 +198,7 @@ class GwsSheetsClient:
         service = _build_sheets_service()
         metadata = service.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
-            fields="sheets.properties.title",
+            fields="sheets.properties.sheetId,sheets.properties.title",
         ).execute()
         titles = {sheet["properties"]["title"] for sheet in metadata.get("sheets", [])}
         if sheet_name in titles:
@@ -177,6 +207,17 @@ class GwsSheetsClient:
             spreadsheetId=spreadsheet_id,
             body={"requests": [{"addSheet": {"properties": {"title": sheet_name}}}]},
         ).execute()
+
+    def _sheet_id(self, spreadsheet_id: str, sheet_name: str) -> int:
+        metadata = _build_sheets_service().spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets.properties.sheetId,sheets.properties.title",
+        ).execute()
+        for sheet in metadata.get("sheets", []):
+            properties = sheet.get("properties", {})
+            if properties.get("title") == sheet_name:
+                return int(properties["sheetId"])
+        raise ValueError(f"Sheet {sheet_name!r} does not exist")
 
 def raw_item_row(item: ScoredTrendItem) -> list[str]:
     """Map one scored trend item to the documented ``raw_items`` column order."""
@@ -188,7 +229,7 @@ def raw_item_row(item: ScoredTrendItem) -> list[str]:
         raw.title,
         raw.url,
         raw.published_at.isoformat(),
-        raw.summary,
+        _truncate_cell(raw.summary, MAX_RAW_ITEM_SUMMARY_LENGTH),
         _json_list(raw.tags),
         _json_list(raw.evidence_urls),
         str(item.relevance_score),
@@ -206,7 +247,7 @@ def collected_raw_item_row(item: RawTrendItem) -> list[str]:
         item.title,
         item.url,
         item.published_at.isoformat(),
-        item.summary,
+        _truncate_cell(item.summary, MAX_RAW_ITEM_SUMMARY_LENGTH),
         _json_list(item.tags),
         _json_list(item.evidence_urls),
         "",
@@ -338,17 +379,74 @@ def read_sheet_rows(
 ) -> list[dict[str, str]]:
     """Read a known AI trends sheet as dictionaries keyed by its schema columns."""
 
+    return [row for _, row in read_sheet_rows_with_numbers(client, sheet_name, spreadsheet_id=spreadsheet_id)]
+
+
+def read_sheet_rows_with_numbers(
+    client: SheetsClient,
+    sheet_name: str,
+    *,
+    spreadsheet_id: str | None = None,
+) -> list[tuple[int, dict[str, str]]]:
+    """Read a known AI trends sheet as ``(one_based_row_number, row)`` pairs."""
+
     columns = _schema_for(sheet_name)
     raw_rows = client.get_values(_spreadsheet_id(spreadsheet_id), _append_range(sheet_name))
     if not raw_rows:
         return []
 
-    data_rows = raw_rows[1:] if tuple(raw_rows[0]) == columns else raw_rows
-    normalized_rows: list[dict[str, str]] = []
-    for row in data_rows:
+    has_header = tuple(raw_rows[0]) == columns
+    data_rows = raw_rows[1:] if has_header else raw_rows
+    first_row_number = 2 if has_header else 1
+    normalized_rows: list[tuple[int, dict[str, str]]] = []
+    for row_number, row in enumerate(data_rows, start=first_row_number):
         padded = [*row, *("" for _ in range(max(0, len(columns) - len(row))))]
-        normalized_rows.append(dict(zip(columns, padded[: len(columns)], strict=True)))
+        normalized_rows.append((row_number, dict(zip(columns, padded[: len(columns)], strict=True))))
     return normalized_rows
+
+
+def update_raw_item_scores(
+    client: SheetsClient,
+    updates: Sequence[tuple[int, ScoredTrendItem]],
+    *,
+    spreadsheet_id: str | None = None,
+) -> list[object]:
+    """Persist Hermes-scored raw item columns for previously untrusted rows."""
+
+    results: list[object] = []
+    if not updates:
+        return results
+    columns = _schema_for(RAW_ITEMS_SHEET)
+    start_column = _column_letter(columns.index("relevance_score") + 1)
+    end_column = _column_letter(columns.index("score_rationale") + 1)
+    for row_number, item in updates:
+        if row_number < 1:
+            raise ValueError("row_number must be a positive one-based sheet row")
+        range_name = f"{RAW_ITEMS_SHEET}!{start_column}{row_number}:{end_column}{row_number}"
+        results.append(
+            client.update_values(
+                _spreadsheet_id(spreadsheet_id),
+                range_name,
+                [[str(item.relevance_score), str(item.importance_score), item.rationale]],
+            )
+        )
+    return results
+
+
+def delete_sheet_rows(
+    client: SheetsClient,
+    sheet_name: str,
+    row_numbers: Sequence[int],
+    *,
+    spreadsheet_id: str | None = None,
+) -> object:
+    """Delete one-based sheet rows through the injected Sheets client."""
+
+    _schema_for(sheet_name)
+    rows = tuple(sorted({row for row in row_numbers if row > 1}, reverse=True))
+    if not rows:
+        return {"deletedRows": 0}
+    return client.delete_rows(_spreadsheet_id(spreadsheet_id), sheet_name, rows)
 
 
 def update_discord_status(
@@ -378,6 +476,16 @@ def update_discord_status(
 
 def _sheet_name(range_name: str) -> str:
     return range_name.split("!", 1)[0].strip("'")
+
+
+def _sheets_timeout_seconds() -> int:
+    raw_value = os.environ.get("AI_TRENDS_SHEETS_TIMEOUT_SECONDS", "").strip()
+    if not raw_value:
+        return 30
+    try:
+        return max(5, min(120, int(raw_value)))
+    except ValueError:
+        return 30
 
 
 def _build_sheets_service():
@@ -429,8 +537,30 @@ def _column_letter(index: int) -> str:
     return letters
 
 
+def _descending_contiguous_ranges(row_numbers: Sequence[int]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    sorted_rows = sorted({row for row in row_numbers if row > 1}, reverse=True)
+    if not sorted_rows:
+        return ranges
+    high = low = sorted_rows[0]
+    for row in sorted_rows[1:]:
+        if row == low - 1:
+            low = row
+            continue
+        ranges.append((low, high))
+        high = low = row
+    ranges.append((low, high))
+    return ranges
+
+
 def _json_list(values: Iterable[str]) -> str:
     return json.dumps(list(values), separators=(",", ":"))
+
+
+def _truncate_cell(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    return f"{value[: max_length - 1]}..."
 
 
 def _validate_discord_status(status: str) -> None:

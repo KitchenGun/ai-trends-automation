@@ -12,9 +12,12 @@ from ai_trends.sheets import (
     append_weekly_digest,
     collected_raw_item_row,
     daily_digest_row,
+    delete_sheet_rows,
     raw_item_row,
     read_sheet_rows,
+    read_sheet_rows_with_numbers,
     update_discord_status,
+    update_raw_item_scores,
     weekly_digest_row,
 )
 
@@ -24,6 +27,7 @@ class FakeSheetsClient:
         self.append_calls: list[tuple[str, str, list[list[str]]]] = []
         self.read_calls: list[tuple[str, str]] = []
         self.update_calls: list[tuple[str, str, list[list[str]]]] = []
+        self.delete_calls: list[tuple[str, str, tuple[int, ...]]] = []
         self.values: list[list[str]] = []
 
     def append_values(self, spreadsheet_id: str, range_name: str, values: list[list[str]]) -> dict[str, object]:
@@ -37,6 +41,10 @@ class FakeSheetsClient:
     def update_values(self, spreadsheet_id: str, range_name: str, values: list[list[str]]) -> dict[str, object]:
         self.update_calls.append((spreadsheet_id, range_name, values))
         return {"updatedRows": len(values)}
+
+    def delete_rows(self, spreadsheet_id: str, sheet_name: str, row_numbers: tuple[int, ...]) -> dict[str, object]:
+        self.delete_calls.append((spreadsheet_id, sheet_name, row_numbers))
+        return {"deletedRows": len(row_numbers)}
 
 
 def _scored_item() -> ScoredTrendItem:
@@ -166,6 +174,9 @@ def test_append_read_and_update_helpers_use_injected_client_without_network() ->
     append_daily_digest(client, daily, spreadsheet_id="sheet-id")
     append_weekly_digest(client, weekly, spreadsheet_id="sheet-id")
     rows = read_sheet_rows(client, "raw_items", spreadsheet_id="sheet-id")
+    rows_with_numbers = read_sheet_rows_with_numbers(client, "raw_items", spreadsheet_id="sheet-id")
+    update_raw_item_scores(client, [(2, scored)], spreadsheet_id="sheet-id")
+    delete_sheet_rows(client, "raw_items", (4, 2, 1, 4), spreadsheet_id="sheet-id")
     update_discord_status(
         client,
         "daily_digest",
@@ -180,7 +191,12 @@ def test_append_read_and_update_helpers_use_injected_client_without_network() ->
     assert client.append_calls[2][1] == "daily_digest!A:K"
     assert client.append_calls[3][1] == "weekly_digest!A:L"
     assert rows == [dict(zip(RAW_ITEMS_COLUMNS, raw_item_row(scored), strict=True))]
-    assert client.update_calls == [("sheet-id", "daily_digest!H2:J2", [["failed", "HTTP 500 from Discord", ""]])]
+    assert rows_with_numbers == [(2, dict(zip(RAW_ITEMS_COLUMNS, raw_item_row(scored), strict=True)))]
+    assert client.delete_calls == [("sheet-id", "raw_items", (4, 2))]
+    assert client.update_calls == [
+        ("sheet-id", "raw_items!I2:K2", [["9", "8", "Official evidence with concrete AI-agent workflow impact."]]),
+        ("sheet-id", "daily_digest!H2:J2", [["failed", "HTTP 500 from Discord", ""]]),
+    ]
 
 
 def test_default_spreadsheet_id_reads_only_scoped_env(monkeypatch) -> None:
@@ -206,3 +222,11 @@ def test_helpers_do_not_leak_secret_values_in_errors() -> None:
 
     assert "spreadsheet-secret-value" not in message
     assert "unknown" in message
+
+
+def test_gws_client_timeout_reads_scoped_env(monkeypatch) -> None:
+    from ai_trends.sheets import GwsSheetsClient
+
+    monkeypatch.setenv("AI_TRENDS_SHEETS_TIMEOUT_SECONDS", "17")
+
+    assert GwsSheetsClient().timeout == 17

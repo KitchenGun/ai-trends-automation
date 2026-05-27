@@ -7,17 +7,24 @@ ROOT = Path(__file__).resolve().parents[2]
 DAILY_JOB = ROOT / "jobs" / "daily" / "daily_ai_agent_trend_collector.yaml"
 HOURLY_JOB = ROOT / "jobs" / "hourly" / "hourly_ai_agent_trend_collector.yaml"
 WEEKLY_JOB = ROOT / "jobs" / "weekly" / "weekly_ai_agent_trend_digest.yaml"
+X_RSS_ENV_NAMES = {
+    "AI_TRENDS_X_RSS_FEEDS_JSON",
+    "AI_TRENDS_X_RSS_FEEDS_FILE",
+    "AI_TRENDS_X_RSS_FEED_TIMEOUT_SECONDS",
+    "AI_TRENDS_X_RSS_TOTAL_BUDGET_SECONDS",
+    "AI_TRENDS_X_RSS_FEED_LIMIT",
+}
 REQUIRED_ENV_NAMES = {
     "AI_TRENDS_SPREADSHEET_ID",
     "AI_TRENDS_DISCORD_WEBHOOK_URL",
     "AI_TRENDS_GITHUB_TOKEN",
     "HERMES_TIMEZONE",
-}
+} | X_RSS_ENV_NAMES
 COLLECTOR_ENV_NAMES = {
     "AI_TRENDS_SPREADSHEET_ID",
     "AI_TRENDS_GITHUB_TOKEN",
     "HERMES_TIMEZONE",
-}
+} | X_RSS_ENV_NAMES
 
 
 def _load_job(path: Path) -> dict:

@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from ai_trends.models import RawTrendItem
 
 _TRACKING_QUERY_PREFIXES = ("utm_",)
-_TRACKING_QUERY_NAMES = {"fbclid", "gclid", "mc_cid", "mc_eid"}
+_TRACKING_QUERY_NAMES = {"fbclid", "gclid", "mc_cid", "mc_eid", "ref"}
 _NON_WORD_RE = re.compile(r"[^\w]+", re.UNICODE)
 _SPACE_RE = re.compile(r"\s+")
 

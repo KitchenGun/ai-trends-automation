@@ -8,7 +8,7 @@ without browser state or operator-local files.
 1. Official RSS or Atom feeds.
 2. Official public API endpoints with documented response formats.
 3. Public GitHub releases endpoints for project release signals.
-4. X recent search only as a weak signal when explicitly enabled.
+4. X recent search or configured X RSS feeds only as weak signals when explicitly enabled.
 
 ## Allowed source types
 
@@ -17,7 +17,9 @@ without browser state or operator-local files.
 | `rss` | Official blogs and announcement feeds | Parsed into normalized `blog` raw items. |
 | `atom` | Official Atom feeds | Parsed into normalized `atom` raw items. |
 | `github_release` | Release notes for agent frameworks, model tooling, MCP tools, and infrastructure | Uses public release payloads; token may be used for rate limits. |
-| `x_weak_signal` | Early social signals | Never primary evidence. Requires `AI_TRENDS_X_BEARER_TOKEN`. |
+| `unitysquare_blog` | Unity Korea official UnitySquare blog list endpoint | Parsed into normalized `official_site` raw items. |
+| `x_weak_signal` | Early social signals from X recent search | Never primary evidence. Requires `AI_TRENDS_X_BEARER_TOKEN`. |
+| `x_rss_signal` | Early social signals from configured public RSS/Atom feeds | Never primary evidence. Requires `AI_TRENDS_X_RSS_FEEDS_JSON` or `AI_TRENDS_X_RSS_FEEDS_FILE`; no login, cookies, or scraping. |
 
 ## Active default sources
 
@@ -26,9 +28,8 @@ without browser state or operator-local files.
 - Hugging Face Blog RSS: `https://huggingface.co/blog/feed.xml`
 - Microsoft AI Blog RSS: `https://blogs.microsoft.com/ai/feed/`
 - NVIDIA Generative AI Blog RSS: `https://developer.nvidia.com/blog/category/generative-ai/feed/`
-- Unreal Engine News RSS: `https://www.unrealengine.com/rss`
-- Unity Games Blog RSS: `https://blog.unity.com/games/feed`
-- Unity Engine Platform Blog RSS: `https://blog.unity.com/engine-platform/feed`
+- Unreal Engine official Atom feed: `https://www.unrealengine.com/rss`
+- Unity Square Korea Blog official list endpoint: `https://unitysquare.co.kr/growwith/unityblog/unityWebinarList?page=1&search_sort=desc`
 - Hermes Agent GitHub releases: `https://api.github.com/repos/NousResearch/hermes-agent/releases`
 - OpenAI Agents SDK GitHub releases: `https://api.github.com/repos/openai/openai-agents-python/releases`
 - LangChain GitHub releases: `https://api.github.com/repos/langchain-ai/langchain/releases`
@@ -40,6 +41,7 @@ without browser state or operator-local files.
 - CrewAI GitHub releases: `https://api.github.com/repos/crewAIInc/crewAI/releases`
 - Unity ML-Agents GitHub releases: `https://api.github.com/repos/Unity-Technologies/ml-agents/releases`
 - X recent search weak signal when `AI_TRENDS_X_BEARER_TOKEN` is registered.
+- X RSS weak signals when `AI_TRENDS_X_RSS_FEEDS_JSON` or `AI_TRENDS_X_RSS_FEEDS_FILE` is registered.
 
 Do not add known failing feed URLs such as unavailable Anthropic or Mistral RSS
 candidates until an official fetchable feed/API endpoint is confirmed.
@@ -51,9 +53,10 @@ evidence.
 
 Rules:
 
-- Keep X disabled unless `AI_TRENDS_X_BEARER_TOKEN` is explicitly registered.
-- Mark X-derived rows with `source_type` `x_weak_signal` and tag
-  `x-weak-signal`.
+- Keep X API collection disabled unless `AI_TRENDS_X_BEARER_TOKEN` is explicitly registered.
+- Keep X RSS collection disabled unless `AI_TRENDS_X_RSS_FEEDS_JSON` or `AI_TRENDS_X_RSS_FEEDS_FILE` is explicitly registered.
+- Mark X API rows with `source_type` `x_weak_signal` and tag `x-weak-signal`.
+- Mark X RSS rows with `source_type` `x_rss_signal` and tag `x-rss-signal`.
 - Prefer the first URL in the post as evidence; otherwise use the canonical post
   URL.
 - Do not publish a high-impact claim based only on X. Confirm with an official

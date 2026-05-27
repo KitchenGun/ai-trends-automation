@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
+import subprocess
 
 import pytest
 
-from ai_trends.daily import run_daily_digest_workflow, run_daily_workflow
+from ai_trends.daily import _resolve_agent_scored_items, run_daily_digest_workflow, run_daily_workflow
 from ai_trends.models import RawTrendItem, ScoredTrendItem
-from ai_trends.sheets import DAILY_DIGEST_COLUMNS, WEEKLY_DIGEST_COLUMNS
+from ai_trends.sheets import DAILY_DIGEST_COLUMNS, RAW_ITEMS_COLUMNS, WEEKLY_DIGEST_COLUMNS
 from ai_trends.weekly import run_weekly_workflow
 
 
@@ -101,7 +102,7 @@ def test_weekly_spreadsheet_append_failure_prevents_discord_send() -> None:
             '["https://example.invalid/review"]',
             "9",
             "8",
-            "Official evidence with concrete AI-agent workflow impact.",
+            "Hermes agent: Official evidence with concrete AI-agent workflow impact.",
         ],
     ]
     discord_calls: list[str] = []
@@ -147,7 +148,76 @@ def test_daily_discord_failure_preserves_digest_row_with_empty_sent_at_and_faile
     )
 
 
-def test_daily_digest_scores_unscored_raw_rows_at_report_time() -> None:
+def test_daily_digest_skips_unscored_raw_rows_when_inline_scoring_disabled(monkeypatch) -> None:
+    monkeypatch.delenv("AI_TRENDS_DIGEST_INLINE_SCORING", raising=False)
+    monkeypatch.setenv("AI_TRENDS_DAILY_FALLBACK_LATEST", "0")
+    sheets = RecordingSheetsClient()
+    sheets.values = [
+        [
+            "source_name",
+            "source_type",
+            "title",
+            "url",
+            "published_at",
+            "summary",
+            "tags_json",
+            "evidence_urls_json",
+            "relevance_score",
+            "importance_score",
+            "score_rationale",
+        ],
+        [
+            "Official Blog",
+            "blog",
+            "Hermes autonomous review",
+            "https://example.invalid/review",
+            "2026-05-22T09:00:00+00:00",
+            "Hermes adds agentic code review workflows.",
+            '["ai-agent","code-review"]',
+            '["https://example.invalid/review"]',
+            "",
+            "",
+            "",
+        ],
+    ]
+
+    result = run_daily_digest_workflow(
+        sheets,
+        spreadsheet_id="sheet-id",
+        discord_webhook_url="https://example.invalid/webhook-secret",
+        discord_transport=lambda _url, _headers, _body: (204, ""),
+        digest_date="2026-05-22",
+    )
+
+    assert result.discord_status == "skipped"
+    assert not any(call[1].startswith("raw_items!") for call in sheets.update_calls)
+    assert sheets.append_calls == []
+
+
+def test_daily_resolve_skips_untrusted_items_when_inline_scoring_disabled(monkeypatch) -> None:
+    monkeypatch.delenv("AI_TRENDS_DIGEST_INLINE_SCORING", raising=False)
+    sheets = RecordingSheetsClient()
+    scored = ScoredTrendItem(
+        raw_item=_raw_item("Hermes scored review"),
+        relevance_score=9,
+        importance_score=8,
+        rationale="Hermes agent: Official evidence with concrete AI-agent workflow impact.",
+    )
+
+    resolved = _resolve_agent_scored_items(
+        sheets,
+        spreadsheet_id="sheet-id",
+        items=[scored, (2, _raw_item("Unscored report-time candidate"))],
+        untrusted_items=[(2, _raw_item("Unscored report-time candidate"))],
+        hermes_requester=lambda _prompt: pytest.fail("inline Hermes scoring should be disabled by default"),
+    )
+
+    assert resolved == (scored,)
+    assert sheets.update_calls == []
+
+
+def test_daily_digest_scores_unscored_raw_rows_when_inline_scoring_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("AI_TRENDS_DIGEST_INLINE_SCORING", "1")
     sheets = RecordingSheetsClient()
     sheets.values = [
         [
@@ -189,7 +259,52 @@ def test_daily_digest_scores_unscored_raw_rows_at_report_time() -> None:
 
     assert result.discord_status == "sent"
     digest_row = sheets.append_calls[0][2][0]
+    assert sheets.update_calls[0] == ("sheet-id", "raw_items!I2:K2", [["9", "8", "Hermes agent: Report-time scoring"]])
     assert "Report-time scoring" in digest_row[DAILY_DIGEST_COLUMNS.index("score_rationales_json")]
+
+
+def test_daily_digest_re_scores_unmarked_existing_scores_with_agent_judgment(monkeypatch) -> None:
+    monkeypatch.setenv("AI_TRENDS_DIGEST_INLINE_SCORING", "1")
+    sheets = RecordingSheetsClient()
+    sheets.values = [
+        [
+            "source_name",
+            "source_type",
+            "title",
+            "url",
+            "published_at",
+            "summary",
+            "tags_json",
+            "evidence_urls_json",
+            "relevance_score",
+            "importance_score",
+            "score_rationale",
+        ],
+        [
+            "Official Blog",
+            "blog",
+            "Hermes autonomous review",
+            "https://example.invalid/review",
+            "2026-05-22T09:00:00+00:00",
+            "Hermes adds agentic code review workflows.",
+            '["ai-agent","code-review"]',
+            '["https://example.invalid/review"]',
+            "1",
+            "1",
+            "keyword match",
+        ],
+    ]
+
+    run_daily_digest_workflow(
+        sheets,
+        spreadsheet_id="sheet-id",
+        discord_webhook_url="https://example.invalid/webhook-secret",
+        hermes_requester=lambda _prompt: '{"relevance_score":9,"importance_score":8,"rationale":"Agent reviewed evidence"}',
+        discord_transport=lambda _url, _headers, _body: (204, ""),
+        digest_date="2026-05-22",
+    )
+
+    assert sheets.update_calls[0] == ("sheet-id", "raw_items!I2:K2", [["9", "8", "Hermes agent: Agent reviewed evidence"]])
 
 
 def test_weekly_discord_failure_preserves_digest_row_with_empty_sent_at_and_failed_status() -> None:
@@ -219,7 +334,55 @@ def test_weekly_discord_failure_preserves_digest_row_with_empty_sent_at_and_fail
     )
 
 
-def test_weekly_report_scores_unscored_raw_rows_at_report_time() -> None:
+def test_weekly_report_skips_unscored_raw_rows_when_inline_scoring_disabled(monkeypatch) -> None:
+    monkeypatch.delenv("AI_TRENDS_DIGEST_INLINE_SCORING", raising=False)
+    sheets = RecordingSheetsClient()
+    sheets.values = [
+        [
+            "source_name",
+            "source_type",
+            "title",
+            "url",
+            "published_at",
+            "summary",
+            "tags_json",
+            "evidence_urls_json",
+            "relevance_score",
+            "importance_score",
+            "score_rationale",
+        ],
+        [
+            "Official Blog",
+            "blog",
+            "Hermes autonomous review",
+            "https://example.invalid/review",
+            "2026-05-22T09:00:00+00:00",
+            "Hermes adds agentic code review workflows.",
+            '["ai-agent","code-review"]',
+            '["https://example.invalid/review"]',
+            "",
+            "",
+            "",
+        ],
+    ]
+
+    result = run_weekly_workflow(
+        sheets,
+        spreadsheet_id="sheet-id",
+        discord_webhook_url="https://example.invalid/webhook-secret",
+        discord_transport=lambda _url, _headers, _body: (204, ""),
+        summary_requester=lambda _prompt: "Weekly summary for AI agent builders.",
+        week_start="2026-05-18",
+        week_end="2026-05-24",
+    )
+
+    assert result.discord_status == "skipped"
+    assert not any(call[1].startswith("raw_items!") for call in sheets.update_calls)
+    assert sheets.append_calls == []
+
+
+def test_weekly_report_scores_unscored_raw_rows_when_inline_scoring_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("AI_TRENDS_DIGEST_INLINE_SCORING", "1")
     sheets = RecordingSheetsClient()
     sheets.values = [
         [
@@ -263,4 +426,98 @@ def test_weekly_report_scores_unscored_raw_rows_at_report_time() -> None:
 
     assert result.discord_status == "sent"
     digest_row = sheets.append_calls[0][2][0]
+    assert sheets.update_calls[0] == ("sheet-id", "raw_items!I2:K2", [["9", "8", "Hermes agent: Weekly report-time scoring"]])
     assert "Weekly report-time scoring" in digest_row[WEEKLY_DIGEST_COLUMNS.index("score_rationales_json")]
+
+
+
+def _scored_raw_row(
+    title: str,
+    *,
+    source_type: str = "blog",
+    relevance_score: int = 5,
+    importance_score: int = 5,
+) -> list[str]:
+    return [
+        "X RSS" if source_type == "x_rss_signal" else "Official Blog",
+        source_type,
+        title,
+        f"https://example.invalid/{title.lower().replace(' ', '-')}",
+        "2026-05-22T09:00:00+00:00",
+        f"{title} summary for AI agent builders.",
+        '["x-rss-signal","x-author:@NousResearch"]' if source_type == "x_rss_signal" else '["ai-agent"]',
+        f'["https://example.invalid/{title.lower().replace(" ", "-")}"]',
+        str(relevance_score),
+        str(importance_score),
+        f"Hermes agent: scored {title}",
+    ]
+
+
+def test_daily_digest_ranks_scored_rows_before_applying_limit(monkeypatch) -> None:
+    monkeypatch.delenv("AI_TRENDS_DIGEST_INLINE_SCORING", raising=False)
+    monkeypatch.setenv("AI_TRENDS_DAILY_ITEM_LIMIT", "1")
+    sheets = RecordingSheetsClient()
+    sheets.values = [
+        list(RAW_ITEMS_COLUMNS),
+        _scored_raw_row("Low priority release", relevance_score=2, importance_score=2),
+        _scored_raw_row("Hermes Agent X RSS update", source_type="x_rss_signal", relevance_score=9, importance_score=9),
+    ]
+
+    result = run_daily_digest_workflow(
+        sheets,
+        spreadsheet_id="sheet-id",
+        discord_webhook_url="https://example.invalid/webhook-secret",
+        discord_transport=lambda _url, _headers, _body: (204, ""),
+        digest_date="2026-05-22",
+    )
+
+    assert result.discord_status == "sent"
+    digest_row = sheets.append_calls[0][2][0]
+    assert "Hermes Agent X RSS update" in digest_row[DAILY_DIGEST_COLUMNS.index("top_titles_json")]
+    assert "Low priority release" not in digest_row[DAILY_DIGEST_COLUMNS.index("top_titles_json")]
+
+
+def test_weekly_digest_ranks_scored_rows_before_applying_limit(monkeypatch) -> None:
+    monkeypatch.delenv("AI_TRENDS_DIGEST_INLINE_SCORING", raising=False)
+    monkeypatch.setenv("AI_TRENDS_WEEKLY_ITEM_LIMIT", "1")
+    sheets = RecordingSheetsClient()
+    sheets.values = [
+        list(RAW_ITEMS_COLUMNS),
+        _scored_raw_row("Low priority release", relevance_score=2, importance_score=2),
+        _scored_raw_row("Hermes Agent X RSS update", source_type="x_rss_signal", relevance_score=9, importance_score=9),
+    ]
+
+    result = run_weekly_workflow(
+        sheets,
+        spreadsheet_id="sheet-id",
+        discord_webhook_url="https://example.invalid/webhook-secret",
+        discord_transport=lambda _url, _headers, _body: (204, ""),
+        summary_requester=lambda _prompt: "Weekly summary for AI agent builders.",
+        week_start="2026-05-18",
+        week_end="2026-05-24",
+    )
+
+    assert result.discord_status == "sent"
+    digest_row = sheets.append_calls[0][2][0]
+    assert "Hermes Agent X RSS update" in digest_row[WEEKLY_DIGEST_COLUMNS.index("top_titles_json")]
+    assert "Low priority release" not in digest_row[WEEKLY_DIGEST_COLUMNS.index("top_titles_json")]
+
+def test_weekly_summary_timeout_uses_fallback_summary() -> None:
+    sheets = RecordingSheetsClient()
+
+    result = run_weekly_workflow(
+        sheets,
+        spreadsheet_id="sheet-id",
+        discord_webhook_url="https://example.invalid/webhook-secret",
+        discord_transport=lambda _url, _headers, _body: (204, ""),
+        summary_requester=lambda _prompt: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["hermes"], timeout=1)),
+        scored_items=(_scored_item(),),
+        week_start="2026-05-18",
+        week_end="2026-05-24",
+    )
+
+    assert result.discord_status == "sent"
+    digest_row = sheets.append_calls[0][2][0]
+    summary = digest_row[WEEKLY_DIGEST_COLUMNS.index("summary")]
+    assert "자동 예비 요약" in summary
+    assert "fallback" not in summary

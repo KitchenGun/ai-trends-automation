@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -11,15 +12,17 @@ from typing import Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from ai_trends.config import load_ai_trends_config
-from ai_trends.daily import WorkflowResult, _appended_row_number, _ensure_aware_utc
+from ai_trends.daily import WorkflowResult, _appended_row_number, _canonical_item_url_set, _digest_row_link_set, _ensure_aware_utc, _digest_inline_scoring_enabled, _raw_item_identity, _mark_agent_scored_items, _row_has_agent_score
 from ai_trends.dedupe import dedupe_trend_items
 from ai_trends.discord import DiscordTransport, render_weekly_digest_message, send_discord_webhook
 from ai_trends.hermes_eval import HermesRequester, evaluate_trend_items
 from ai_trends.models import RawTrendItem, ScoredTrendItem, WeeklyDigest
-from ai_trends.sheets import RAW_ITEMS_SHEET, WEEKLY_DIGEST_SHEET, GwsSheetsClient, SheetsClient, append_weekly_digest, read_sheet_rows, update_discord_status
+from ai_trends.sheets import RAW_ITEMS_SHEET, WEEKLY_DIGEST_SHEET, GwsSheetsClient, SheetsClient, append_weekly_digest, read_sheet_rows, read_sheet_rows_with_numbers, update_discord_status, update_raw_item_scores
 
 SummaryRequester = Callable[[str], str]
+LOGGER = logging.getLogger(__name__)
 DEFAULT_WEEKLY_ITEM_LIMIT = 20
+DEFAULT_WEEKLY_SUMMARY_TIMEOUT_SECONDS = 45
 
 
 def run_weekly_workflow(
@@ -58,7 +61,12 @@ def run_weekly_workflow(
         week_end=end_date,
         hermes_requester=hermes_requester,
     )
-    deduped_items = _dedupe_scored_items(items)[:_weekly_item_limit()]
+    deduped_items = _rank_scored_items(_dedupe_scored_items(items))[:_weekly_item_limit()]
+    if not deduped_items:
+        return WorkflowResult(
+            discord_status="skipped",
+            discord_error=f"week window({start_date.isoformat()}~{end_date.isoformat()})에 Hermes agent 점수 항목이 없습니다",
+        )
     summary = _weekly_summary(deduped_items, start_date=start_date, end_date=end_date, requester=summary_requester)
     digest = WeeklyDigest(
         week_start=start_date.isoformat(),
@@ -66,6 +74,15 @@ def run_weekly_workflow(
         items=deduped_items,
         summary=summary,
     )
+    if _matching_weekly_digest_exists(
+        sheets_client,
+        digest,
+        spreadsheet_id=active_spreadsheet_id,
+    ):
+        return WorkflowResult(
+            discord_status="skipped",
+            discord_error=f"동일 week window({digest.week_start}~{digest.week_end})와 동일 item set이 이미 기록되어 있습니다",
+        )
     append_result = append_weekly_digest(
         sheets_client,
         digest,
@@ -136,24 +153,47 @@ def _read_scored_items(
     week_end: date,
     hermes_requester: HermesRequester | None = None,
 ) -> tuple[ScoredTrendItem, ...]:
-    rows = read_sheet_rows(sheets_client, RAW_ITEMS_SHEET, spreadsheet_id=spreadsheet_id)
-    items: list[ScoredTrendItem] = []
-    unscored_items: list[RawTrendItem] = []
-    for row in rows:
+    rows = read_sheet_rows_with_numbers(sheets_client, RAW_ITEMS_SHEET, spreadsheet_id=spreadsheet_id)
+    items: list[ScoredTrendItem | tuple[int, RawTrendItem]] = []
+    untrusted_items: list[tuple[int, RawTrendItem]] = []
+    for row_number, row in rows:
         raw_item = _raw_item_from_row(row)
         published_date = raw_item.published_at.date()
         if not week_start <= published_date <= week_end:
             continue
-        if _row_has_score(row):
+        if _row_has_agent_score(row):
             items.append(_scored_item_from_row(row))
-        else:
-            unscored_items.append(raw_item)
-        if len(items) + len(unscored_items) >= _weekly_item_limit():
-            break
-    if unscored_items:
-        for item in evaluate_trend_items(dedupe_trend_items(tuple(unscored_items)), requester=hermes_requester):
-            items.append(item)
-    return tuple(items)
+        elif _digest_inline_scoring_enabled():
+            pending = (row_number, raw_item)
+            items.append(pending)
+            untrusted_items.append(pending)
+    if not untrusted_items:
+        return tuple(item for item in items if isinstance(item, ScoredTrendItem))
+
+    scored_items = _mark_agent_scored_items(
+        evaluate_trend_items(
+            dedupe_trend_items(tuple(raw_item for _, raw_item in untrusted_items)),
+            requester=hermes_requester,
+        )
+    )
+    scored_by_identity = {_raw_item_identity(item.raw_item): item for item in scored_items}
+    updates = [
+        (row_number, scored_by_identity[_raw_item_identity(raw_item)])
+        for row_number, raw_item in untrusted_items
+        if _raw_item_identity(raw_item) in scored_by_identity
+    ]
+    update_raw_item_scores(sheets_client, updates, spreadsheet_id=spreadsheet_id)
+
+    resolved: list[ScoredTrendItem] = []
+    for item in items:
+        if isinstance(item, ScoredTrendItem):
+            resolved.append(item)
+            continue
+        _, raw_item = item
+        scored_item = scored_by_identity.get(_raw_item_identity(raw_item))
+        if scored_item is not None:
+            resolved.append(scored_item)
+    return tuple(resolved)
 
 
 def _raw_item_from_row(row: Mapping[str, str]) -> RawTrendItem:
@@ -179,14 +219,36 @@ def _scored_item_from_row(row: Mapping[str, str]) -> ScoredTrendItem:
     )
 
 
-def _row_has_score(row: Mapping[str, str]) -> bool:
-    return all(str(row.get(name, "")).strip() for name in ("relevance_score", "importance_score", "score_rationale"))
+def _rank_scored_items(items: tuple[ScoredTrendItem, ...]) -> tuple[ScoredTrendItem, ...]:
+    return tuple(
+        sorted(
+            items,
+            key=lambda item: (item.importance_score, item.relevance_score, _ensure_aware_utc(item.raw_item.published_at)),
+            reverse=True,
+        )
+    )
 
 
 def _dedupe_scored_items(items: tuple[ScoredTrendItem, ...]) -> tuple[ScoredTrendItem, ...]:
     deduped_raw_items = dedupe_trend_items(tuple(item.raw_item for item in items))
     by_identity = {(item.raw_item.source_name, item.raw_item.title, item.raw_item.url): item for item in items}
     return tuple(by_identity[(item.source_name, item.title, item.url)] for item in deduped_raw_items)
+
+
+def _matching_weekly_digest_exists(
+    sheets_client: SheetsClient,
+    digest: WeeklyDigest,
+    *,
+    spreadsheet_id: str,
+) -> bool:
+    target_links = _canonical_item_url_set(item.raw_item.url for item in digest.items)
+    rows = read_sheet_rows(sheets_client, WEEKLY_DIGEST_SHEET, spreadsheet_id=spreadsheet_id)
+    for row in rows:
+        if row.get("week_start") != digest.week_start or row.get("week_end") != digest.week_end:
+            continue
+        if _digest_row_link_set(row) == target_links:
+            return True
+    return False
 
 
 def _weekly_summary(
@@ -197,10 +259,17 @@ def _weekly_summary(
     requester: SummaryRequester | None,
 ) -> str:
     prompt = _weekly_summary_prompt(items, start_date=start_date, end_date=end_date)
-    response = (requester or _request_hermes_cli)(prompt).strip()
-    if not response:
-        raise ValueError("Weekly summary must be non-blank")
-    return response
+    try:
+        response = (requester or _request_hermes_cli)(prompt).strip()
+        if not response:
+            raise ValueError("Weekly summary must be non-blank")
+        return response
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        LOGGER.warning(
+            "Weekly Hermes summary failed; using deterministic fallback",
+            extra={"error_type": exc.__class__.__name__, "item_count": len(items)},
+        )
+        return _fallback_weekly_summary(items, start_date=start_date, end_date=end_date)
 
 
 def _weekly_summary_prompt(items: tuple[ScoredTrendItem, ...], *, start_date: date, end_date: date) -> str:
@@ -217,19 +286,41 @@ def _weekly_summary_prompt(items: tuple[ScoredTrendItem, ...], *, start_date: da
     )
 
 
+def _fallback_weekly_summary(items: tuple[ScoredTrendItem, ...], *, start_date: date, end_date: date) -> str:
+    top_items = sorted(items, key=lambda item: (item.importance_score, item.relevance_score), reverse=True)[:3]
+    lines = "; ".join(f"{item.raw_item.title}" for item in top_items)
+    return (
+        f"{start_date.isoformat()}~{end_date.isoformat()} 주간 AI 에이전트 "
+        "트렌드 자동 예비 요약입니다. Hermes 요약 호출이 지연되어 "
+        "확정형 한국어 요약 대신 상위 점수 항목 중심으로 정리했습니다. "
+        f"주요 항목: {lines}"
+    )
+
+
 def _request_hermes_cli(prompt: str) -> str:
     completed = subprocess.run(
         [_hermes_bin(), "-z", prompt],
         check=True,
         capture_output=True,
         text=True,
-        timeout=120,
+        stdin=subprocess.DEVNULL,
+        timeout=_weekly_summary_timeout_seconds(),
     )
     return completed.stdout.strip()
 
 
 def _hermes_bin() -> str:
     return os.environ.get("HERMES_BIN") or shutil.which("hermes") or "hermes"
+
+
+def _weekly_summary_timeout_seconds() -> int:
+    raw_value = os.environ.get("AI_TRENDS_WEEKLY_SUMMARY_TIMEOUT_SECONDS", "").strip()
+    if not raw_value:
+        return DEFAULT_WEEKLY_SUMMARY_TIMEOUT_SECONDS
+    try:
+        return max(10, min(120, int(raw_value)))
+    except ValueError:
+        return DEFAULT_WEEKLY_SUMMARY_TIMEOUT_SECONDS
 
 
 def _weekly_item_limit() -> int:

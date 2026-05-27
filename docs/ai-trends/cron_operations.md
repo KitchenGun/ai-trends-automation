@@ -62,6 +62,11 @@ Cron profile에 아래 이름을 등록합니다. 값은 문서, job YAML, git t
 | `HERMES_BIN` | Recommended when scoring/summarizing with Hermes CLI | Hermes CLI 실행 파일의 안전한 절대 경로입니다. Scheduler 환경에서 `hermes`가 잘못 resolve되면 시간별/주간 실행이 실패할 수 있습니다. |
 | `HERMES_PYTHON` | Optional | Python 실행 파일 override. 기본 Hermes venv Python이 있으면 wrapper가 자동 사용합니다. |
 | `AI_TRENDS_X_BEARER_TOKEN` | Optional | X를 weak signal source로 승인했을 때만 설정합니다. |
+| `AI_TRENDS_X_RSS_FEEDS_JSON` | Optional | 공개 RSS/Atom feed URL 목록을 JSON으로 직접 지정할 때만 설정합니다. Secret을 넣지 않습니다. |
+| `AI_TRENDS_X_RSS_FEEDS_FILE` | Optional | 공개 RSS/Atom feed URL 목록 파일 경로입니다. VM 기본값은 `/home/ubuntu/.hermes/jobs/config/ai-trends-x-rss-feeds.json`입니다. |
+| `AI_TRENDS_X_RSS_FEED_TIMEOUT_SECONDS` | Optional | feed별 fetch timeout입니다. |
+| `AI_TRENDS_X_RSS_TOTAL_BUDGET_SECONDS` | Optional | X RSS 전체 fetch budget입니다. |
+| `AI_TRENDS_X_RSS_FEED_LIMIT` | Optional | feed별 최대 항목 수입니다. |
 | `AI_TRENDS_GITHUB_TOKEN` | Optional | GitHub API rate limit 때문에 인증 read가 필요할 때만 설정합니다. 미설정 시 cron runtime의 `gh auth token`을 사용할 수 있습니다. |
 | `GOOGLE_APPLICATION_CREDENTIALS` 또는 `GOOGLE_SERVICE_ACCOUNT_JSON` | Optional, environment-dependent | Google Sheets adapter가 service account를 요구할 때 사용합니다. OAuth 기반 Google Workspace integration을 쓰면 없을 수 있습니다. |
 

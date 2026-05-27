@@ -34,6 +34,8 @@ def test_config_loads_only_approved_env_names_and_redacts_secrets() -> None:
         "AI_TRENDS_SPREADSHEET_ID": "spreadsheet-id-from-env",
         "AI_TRENDS_DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook-from-env",
         "AI_TRENDS_X_BEARER_TOKEN": "x-token-from-env",
+        "AI_TRENDS_X_RSS_FEEDS_JSON": '["https://rss.example.invalid/alice.xml"]',
+        "AI_TRENDS_X_RSS_FEEDS_FILE": "/var/lib/ai-trends/x-rss-feeds.json",
         "AI_TRENDS_GITHUB_TOKEN": "github-token-from-env",
         "HERMES_TIMEZONE": "Asia/Seoul",
         "UNRELATED_SECRET": "must-not-be-read",
@@ -44,18 +46,24 @@ def test_config_loads_only_approved_env_names_and_redacts_secrets() -> None:
     assert config.spreadsheet_id == "spreadsheet-id-from-env"
     assert config.discord_webhook_url == "https://discord.invalid/webhook-from-env"
     assert config.x_bearer_token == "x-token-from-env"
+    assert config.x_rss_feeds_json == '["https://rss.example.invalid/alice.xml"]'
+    assert config.x_rss_feeds_file == "/var/lib/ai-trends/x-rss-feeds.json"
     assert config.github_token == "github-token-from-env"
     assert config.timezone == "Asia/Seoul"
     assert set(ALLOWED_ENV_VAR_NAMES) == {
         "AI_TRENDS_SPREADSHEET_ID",
         "AI_TRENDS_DISCORD_WEBHOOK_URL",
         "AI_TRENDS_X_BEARER_TOKEN",
+        "AI_TRENDS_X_RSS_FEEDS_JSON",
+        "AI_TRENDS_X_RSS_FEEDS_FILE",
         "AI_TRENDS_GITHUB_TOKEN",
         "HERMES_TIMEZONE",
     }
     assert "must-not-be-read" not in repr(config)
     assert "webhook-from-env" not in repr(config)
     assert "x-token-from-env" not in repr(config)
+    assert "rss.example.invalid" not in repr(config)
+    assert "rss.example.invalid" not in repr(config)
     assert "github-token-from-env" not in repr(config)
 
 
@@ -78,6 +86,7 @@ def test_collection_config_does_not_require_discord_webhook() -> None:
         {
             "AI_TRENDS_SPREADSHEET_ID": "spreadsheet-id-from-env",
             "AI_TRENDS_X_BEARER_TOKEN": "x-token-from-env",
+            "AI_TRENDS_X_RSS_FEEDS_JSON": '["https://rss.example.invalid/alice.xml"]',
             "HERMES_TIMEZONE": "Asia/Seoul",
         },
         github_token_resolver=lambda: "github-token-from-gh-cli",
@@ -86,6 +95,7 @@ def test_collection_config_does_not_require_discord_webhook() -> None:
     assert config.spreadsheet_id == "spreadsheet-id-from-env"
     assert config.timezone == "Asia/Seoul"
     assert config.x_bearer_token == "x-token-from-env"
+    assert config.x_rss_feeds_json == '["https://rss.example.invalid/alice.xml"]'
     assert config.github_token == "github-token-from-gh-cli"
     assert "spreadsheet-id-from-env" not in repr(config)
     assert "x-token-from-env" not in repr(config)

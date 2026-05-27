@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -12,10 +13,34 @@ from typing import Callable, Mapping
 from ai_trends.models import RawTrendItem, ScoredTrendItem
 
 HermesRequester = Callable[[str], str]
+LOGGER = logging.getLogger(__name__)
+
+AGENT_TREND_TERMS = (
+    "agent",
+    "agents",
+    "agentic",
+    "autonomous",
+    "mcp",
+    "tool use",
+    "tool-use",
+    "developer tool",
+    "developer tools",
+    "coding agent",
+    "code review",
+    "model routing",
+    "orchestration",
+    "workflow automation",
+    "assistant",
+    "copilot",
+)
 
 
 class HermesEvaluationError(ValueError):
     """Raised when Hermes scoring cannot be requested or parsed."""
+
+
+class HermesEvaluationTimeoutError(HermesEvaluationError):
+    """Raised when Hermes scoring exceeds the per-item subprocess deadline."""
 
 
 @dataclass(frozen=True)
@@ -34,14 +59,21 @@ def evaluate_trend_item(
 ) -> ScoredTrendItem:
     """Request Hermes relevance/importance scoring and return a scored item.
 
-    The scoring path intentionally requires a Hermes response with rationale; it
-    does not fall back to keyword counts or other local heuristic scoring.
+    Direct item scoring intentionally requires a Hermes response with rationale;
+    batch scoring handles isolation and deterministic fallback.
     """
+
+    if not is_likely_agent_trend(item):
+        return _fallback_scored_item(item, "irrelevant_prefilter")
 
     prompt = build_evaluation_prompt(item)
     hermes_requester = requester or _request_hermes_cli
     try:
         response = hermes_requester(prompt)
+    except HermesEvaluationError:
+        raise
+    except subprocess.TimeoutExpired as exc:
+        raise HermesEvaluationTimeoutError(f"Hermes evaluation timed out after {exc.timeout}s") from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise HermesEvaluationError("Failed to request Hermes evaluation") from exc
 
@@ -59,9 +91,24 @@ def evaluate_trend_items(
     *,
     requester: HermesRequester | None = None,
 ) -> tuple[ScoredTrendItem, ...]:
-    """Evaluate multiple trend items with Hermes."""
+    """Evaluate multiple trend items while isolating per-candidate failures."""
 
-    return tuple(evaluate_trend_item(item, requester=requester) for item in items)
+    scored_items: list[ScoredTrendItem] = []
+    for item in items:
+        try:
+            scored_items.append(evaluate_trend_item(item, requester=requester))
+        except HermesEvaluationError as exc:
+            LOGGER.warning(
+                "Hermes trend evaluation failed; using fallback score",
+                extra={
+                    "source_name": item.source_name,
+                    "title": item.title,
+                    "url": item.url,
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+            scored_items.append(_fallback_scored_item(item, _fallback_reason(exc)))
+    return tuple(scored_items)
 
 
 def build_evaluation_prompt(item: RawTrendItem) -> str:
@@ -106,15 +153,63 @@ def parse_hermes_evaluation(response: str) -> HermesEvaluation:
     )
 
 
-def _request_hermes_cli(prompt: str) -> str:
-    completed = subprocess.run(
-        [_hermes_bin(), "-z", prompt],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
+def is_likely_agent_trend(item: RawTrendItem) -> bool:
+    """Return whether a candidate is worth spending Hermes CLI time on."""
+
+    haystack = " ".join((item.title, item.summary, " ".join(item.tags))).lower()
+    return any(term in haystack for term in AGENT_TREND_TERMS)
+
+
+def _fallback_scored_item(item: RawTrendItem, reason: str) -> ScoredTrendItem:
+    relevance_score, importance_score = _deterministic_scores(item)
+    return ScoredTrendItem(
+        raw_item=item,
+        relevance_score=relevance_score,
+        importance_score=importance_score,
+        rationale=f"Fallback({reason}): deterministic AI-agent relevance screening used without Hermes CLI judgment.",
     )
+
+
+def _deterministic_scores(item: RawTrendItem) -> tuple[int, int]:
+    haystack = " ".join((item.title, item.summary, " ".join(item.tags))).lower()
+    matches = sum(1 for term in AGENT_TREND_TERMS if term in haystack)
+    if matches <= 0:
+        return 1, 1
+    relevance_score = min(6, 2 + matches)
+    importance_score = min(5, 2 + matches // 2)
+    return relevance_score, importance_score
+
+
+def _fallback_reason(exc: HermesEvaluationError) -> str:
+    if isinstance(exc, HermesEvaluationTimeoutError):
+        return "hermes_cli_timeout"
+    return exc.__class__.__name__.lower()
+
+
+def _request_hermes_cli(prompt: str) -> str:
+    timeout_seconds = _hermes_eval_timeout_seconds()
+    try:
+        completed = subprocess.run(
+            [_hermes_bin(), "-z", prompt, "-t", "safe", "--ignore-rules"],
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HermesEvaluationTimeoutError(f"Hermes evaluation timed out after {timeout_seconds}s") from exc
     return completed.stdout.strip()
+
+
+def _hermes_eval_timeout_seconds() -> int:
+    raw_value = os.environ.get("AI_TRENDS_HERMES_EVAL_TIMEOUT_SECONDS", "").strip()
+    if not raw_value:
+        return 180
+    try:
+        return max(30, int(raw_value))
+    except ValueError:
+        return 180
 
 
 def _hermes_bin() -> str:
